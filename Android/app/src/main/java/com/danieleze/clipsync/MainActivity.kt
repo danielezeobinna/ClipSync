@@ -21,6 +21,9 @@ import okhttp3.OkHttpClient
 import okhttp3.Request
 import android.content.Context
 import androidx.core.content.edit
+import android.content.Intent
+import android.provider.Settings
+import androidx.core.net.toUri
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -42,12 +45,38 @@ fun loadIp(context: Context): String {
     return prefs.getString("windows_ip", "") ?: ""
 }
 
+fun startClipSyncService(context: Context, ip: String) {
+    val intent = Intent(context, ClipSyncService::class.java)
+    intent.putExtra("windows_ip", ip)
+    context.startForegroundService(intent)
+}
+
+fun startOverlay(context: Context) {
+    val intent = Intent(context, OverlayService::class.java)
+    context.startService(intent)
+}
+
+fun checkOverlayPermission(context: Context): Boolean {
+    return Settings.canDrawOverlays(context)
+}
+
+fun requestOverlayPermission(activity: MainActivity) {
+    val intent = Intent(
+        Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
+        "package:${activity.packageName}".toUri()
+    )
+    activity.startActivity(intent)
+}
+
 @Composable
 fun ClipSyncDialog() {
     val scope = rememberCoroutineScope()
-    var statusText by remember { mutableStateOf("Not connected") }
-    var statusColor by remember { mutableStateOf(Color(0xFFAAAAAA)) }
-
+    var statusText by remember {
+        mutableStateOf(if (ClipSyncService.isRunning) "Connected" else "Not connected")
+    }
+    var statusColor by remember {
+        mutableStateOf(if (ClipSyncService.isRunning) Color(0xFF00CC66) else Color(0xFFAAAAAA))
+    }
 
     Surface(
         shape = RoundedCornerShape(16.dp),
@@ -78,6 +107,8 @@ fun ClipSyncDialog() {
             // IP Input
             val context = androidx.compose.ui.platform.LocalContext.current
             var ipText by remember { mutableStateOf(loadIp(context)) }
+            var isConnected by remember { mutableStateOf(ClipSyncService.isRunning) }
+
             OutlinedTextField(
                 value = ipText,
                 onValueChange = { ipText = it },
@@ -99,32 +130,47 @@ fun ClipSyncDialog() {
 
             Button(
                 onClick = {
-                    scope.launch {
-                        statusText = "Connecting..."
-                        statusColor = Color(0xFFFFAA00)
-                        try {
-                            val result = withContext(Dispatchers.IO) {
-                                val client = OkHttpClient.Builder()
-                                    .connectTimeout(5, java.util.concurrent.TimeUnit.SECONDS)
-                                    .readTimeout(5, java.util.concurrent.TimeUnit.SECONDS)
-                                    .build()
-                                val request = Request.Builder()
-                                    .url("http://${ipText}:5765/clip")
-                                    .build()
-                                val response = client.newCall(request).execute()
-                                response.isSuccessful
-                            }
-                            if (result) {
-                                statusText = "Connected"
-                                statusColor = Color(0xFF00CC66)
-                                saveIp(context, ipText)
-                            } else {
-                                statusText = "Failed to connect"
+                    if (isConnected) {
+                        val stopIntent = Intent(context, ClipSyncService::class.java).apply {
+                            action = "DISCONNECT"
+                        }
+                        context.startService(stopIntent)
+                        isConnected = false
+                    } else {
+                        scope.launch {
+                            statusText = "Connecting..."
+                            statusColor = Color(0xFFFFAA00)
+                            try {
+                                val result = withContext(Dispatchers.IO) {
+                                    val client = OkHttpClient.Builder()
+                                        .connectTimeout(5, java.util.concurrent.TimeUnit.SECONDS)
+                                        .readTimeout(5, java.util.concurrent.TimeUnit.SECONDS)
+                                        .build()
+                                    val request = Request.Builder()
+                                        .url("http://${ipText}:5765/clip")
+                                        .build()
+                                    val response = client.newCall(request).execute()
+                                    response.isSuccessful
+                                }
+                                if (result) {
+                                    statusText = "Connected"
+                                    statusColor = Color(0xFF00CC66)
+                                    isConnected = true
+                                    saveIp(context, ipText)
+                                    startClipSyncService(context, ipText)
+                                    if (checkOverlayPermission(context)) {
+                                        startOverlay(context)
+                                    } else {
+                                        requestOverlayPermission(context as MainActivity)
+                                    }
+                                } else {
+                                    statusText = "Failed to connect"
+                                    statusColor = Color(0xFFE74C3C)
+                                }
+                            } catch (e: Exception) {
+                                statusText = "Error: ${e.message}"
                                 statusColor = Color(0xFFE74C3C)
                             }
-                        } catch (_: Exception) {
-                            statusText = "Cannot reach Windows app"
-                            statusColor = Color(0xFFE74C3C)
                         }
                     }
                 },
@@ -132,7 +178,7 @@ fun ClipSyncDialog() {
                 modifier = Modifier.fillMaxWidth(),
                 shape = RoundedCornerShape(8.dp)
             ) {
-                Text("Connect", color = Color.White, fontWeight = FontWeight.Bold)
+                Text(if (isConnected) "Disconnect" else "Connect", color = Color.White, fontWeight = FontWeight.Bold)
             }
         }
     }
