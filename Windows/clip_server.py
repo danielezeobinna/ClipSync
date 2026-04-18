@@ -25,11 +25,13 @@ def get_local_ip():
         s.close()
 
 def create_tray_icon():
-    img = Image.new("RGB", (64, 64), color=(30, 144, 255))
-    draw = ImageDraw.Draw(img)
-    draw.rectangle([16, 20, 48, 44], fill="white")
-    draw.polygon([(24, 44), (40, 44), (32, 56)], fill="white")
-    return img
+    import sys
+    import os
+    if hasattr(sys, '_MEIPASS'):
+        path = os.path.join(sys._MEIPASS, "logo.png")
+    else:
+        path = "logo.png"
+    return Image.open(path)
 
 class ClipHandler(BaseHTTPRequestHandler):
     def do_GET(self):
@@ -96,7 +98,7 @@ def update_tray_menu():
     if tray_icon:
         local_ip = get_local_ip()
         status = "● Running" if is_running else "○ Stopped"
-        toggle_label = "Stop Sharing" if is_running else "Start Sharing"
+        toggle_label = "Stop Connection" if is_running else "Start Connection"
         tray_icon.menu = Menu(
             MenuItem(f"ClipSync  —  {status}", None, enabled=False),
             MenuItem(f"Address: {local_ip}", None, enabled=False),
@@ -159,10 +161,10 @@ def _open_window_thread():
 
     def refresh_button():
         if is_running:
-            toggle_btn.config(text="⏹️  Stop Sharing", bg="#e74c3c",
+            toggle_btn.config(text="⏹️  Stop Connection", bg="#e74c3c",
                               fg="white", command=lambda: [do_stop(), refresh_button()])
         else:
-            toggle_btn.config(text="▶️  Start Sharing", bg="#1e90ff",
+            toggle_btn.config(text="▶️  Start Connection", bg="#1e90ff",
                               fg="white", command=lambda: [do_start(), refresh_button()])
 
     refresh_button()
@@ -180,7 +182,7 @@ if __name__ == "__main__":
 
     local_ip = get_local_ip()
     ip_label = MenuItem(f"Address: {local_ip}", None, enabled=False)
-    toggle_item = MenuItem("Start Sharing", on_tray_toggle)
+    toggle_item = MenuItem("Start Connection", on_tray_toggle)
     quit_item = MenuItem("Quit", on_quit)
 
     tray_icon = Icon("ClipSync", create_tray_icon(), "ClipSync",

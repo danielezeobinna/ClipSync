@@ -12,10 +12,10 @@ import android.os.Looper
 import android.view.Gravity
 import android.view.MotionEvent
 import android.view.WindowManager
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material3.Icon
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -252,14 +252,13 @@ class OverlayService : Service(), LifecycleOwner, SavedStateRegistryOwner {
 fun OverlayIcon() {
     Box(
         modifier = Modifier
-            .size(52.dp)
-            .background(Color(0xFF1a1a2e), RoundedCornerShape(12.dp)),
+            .size(42.dp)
+            .background(Color(0xFF070C23), RoundedCornerShape(12.dp)),
         contentAlignment = Alignment.Center
     ) {
-        Icon(
-            painter = painterResource(id = R.drawable.ic_launcher_foreground),
+        Image(
+            painter = painterResource(id = R.drawable.overlay),
             contentDescription = "ClipSync",
-            tint = Color(0xFF1e90ff),
             modifier = Modifier.size(36.dp)
         )
     }

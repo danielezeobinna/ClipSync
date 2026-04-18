@@ -99,9 +99,8 @@ class ClipSyncService : Service() {
             .createNotificationChannel(channel)
 
         return Notification.Builder(this, CHANNEL_ID)
-            .setContentTitle("ClipSync")
-            .setContentText("Syncing clipboard...")
-            .setSmallIcon(R.drawable.ic_launcher_foreground)
+            .setContentTitle("ClipSync is running")
+            .setSmallIcon(R.drawable.round_content_paste)
             .setOngoing(true)
             .build()
     }
