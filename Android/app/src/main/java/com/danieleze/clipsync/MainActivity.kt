@@ -24,10 +24,56 @@ import androidx.core.content.edit
 import android.content.Intent
 import android.provider.Settings
 import androidx.core.net.toUri
+import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.RequestBody.Companion.toRequestBody
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+
+        // Silent sync mode - no UI
+        if (intent.action == "SILENT_SYNC") {
+            window.setBackgroundDrawableResource(android.R.color.transparent)
+            setContent {
+                SyncScreen {
+                    // This runs after UI is shown
+                    val clipboard = getSystemService(CLIPBOARD_SERVICE) as android.content.ClipboardManager
+                    val clip = clipboard.primaryClip?.getItemAt(0)?.text?.toString() ?: ""
+                    if (clip.isNotEmpty() && clip != ClipSyncService.lastClipContent) {
+                        ClipSyncService.lastClipContent = clip
+                        Thread {
+                            try {
+                                val body = clip.toRequestBody("text/plain".toMediaType())
+                                val request = Request.Builder()
+                                    .url("http://${ClipSyncService.windowsIp}:5765/clip")
+                                    .post(body)
+                                    .build()
+                                OkHttpClient().newCall(request).execute()
+                                runOnUiThread {
+                                    android.widget.Toast.makeText(
+                                        this,
+                                        "Synced to Windows!",
+                                        android.widget.Toast.LENGTH_SHORT
+                                    ).show()
+                                    finish()
+                                }
+                            } catch (_: Exception) {
+                                runOnUiThread { finish() }
+                            }
+                        }.start()
+                    } else {
+                        android.widget.Toast.makeText(
+                            this,
+                            "Nothing new to sync",
+                            android.widget.Toast.LENGTH_SHORT
+                        ).show()
+                        finish()
+                    }
+                }
+            }
+            return
+        }
+
         window.setBackgroundDrawableResource(android.R.color.transparent)
         setContent {
             ClipSyncDialog()
@@ -43,17 +89,6 @@ fun saveIp(context: Context, ip: String) {
 fun loadIp(context: Context): String {
     val prefs = context.getSharedPreferences("clipsync", Context.MODE_PRIVATE)
     return prefs.getString("windows_ip", "") ?: ""
-}
-
-fun startClipSyncService(context: Context, ip: String) {
-    val intent = Intent(context, ClipSyncService::class.java)
-    intent.putExtra("windows_ip", ip)
-    context.startForegroundService(intent)
-}
-
-fun startOverlay(context: Context) {
-    val intent = Intent(context, OverlayService::class.java)
-    context.startService(intent)
 }
 
 fun checkOverlayPermission(context: Context): Boolean {
@@ -131,10 +166,11 @@ fun ClipSyncDialog() {
             Button(
                 onClick = {
                     if (isConnected) {
-                        val stopIntent = Intent(context, ClipSyncService::class.java).apply {
-                            action = "DISCONNECT"
+                        context.stopService(Intent(context, OverlayService::class.java))
+                        val stopService = Intent(context, ClipSyncService::class.java).apply {
+                            action = "STOP"
                         }
-                        context.startService(stopIntent)
+                        context.startService(stopService)
                         isConnected = false
                     } else {
                         scope.launch {
@@ -157,9 +193,16 @@ fun ClipSyncDialog() {
                                     statusColor = Color(0xFF00CC66)
                                     isConnected = true
                                     saveIp(context, ipText)
-                                    startClipSyncService(context, ipText)
                                     if (checkOverlayPermission(context)) {
-                                        startOverlay(context)
+                                        val serviceIntent = Intent(context, ClipSyncService::class.java).apply {
+                                            putExtra("windows_ip", ipText)
+                                        }
+                                        context.startForegroundService(serviceIntent)
+
+                                        val overlayIntent = Intent(context, OverlayService::class.java).apply {
+                                            putExtra("windows_ip", ipText)
+                                        }
+                                        context.startService(overlayIntent)
                                     } else {
                                         requestOverlayPermission(context as MainActivity)
                                     }
@@ -174,12 +217,36 @@ fun ClipSyncDialog() {
                         }
                     }
                 },
-                colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF1e90ff)),
+                colors = ButtonDefaults.buttonColors(containerColor = if (isConnected) Color(0xFFE74C3C) else Color(0xFF1e90ff)),
                 modifier = Modifier.fillMaxWidth(),
                 shape = RoundedCornerShape(8.dp)
             ) {
                 Text(if (isConnected) "Disconnect" else "Connect", color = Color.White, fontWeight = FontWeight.Bold)
             }
+        }
+    }
+}
+
+@Composable
+fun SyncScreen(onReady: () -> Unit) {
+    LaunchedEffect(Unit) {
+        onReady()
+    }
+    Surface(
+        shape = RoundedCornerShape(16.dp),
+        color = Color(0xFF1a1a2e),
+        modifier = Modifier.padding(24.dp)
+    ) {
+        Column(
+            modifier = Modifier.padding(24.dp),
+            horizontalAlignment = Alignment.CenterHorizontally
+        ) {
+            Text(
+                text = "Syncing...",
+                fontSize = 16.sp,
+                fontWeight = FontWeight.Bold,
+                color = Color.White
+            )
         }
     }
 }
