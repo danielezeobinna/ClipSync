@@ -136,6 +136,15 @@ def _open_window_thread():
     window_instance = tk.Tk()
     window = window_instance
 
+    import os, sys, ctypes
+    if hasattr(sys, '_MEIPASS'):
+        icon_path = os.path.join(sys._MEIPASS, "logo.ico")
+    else:
+        icon_path = "logo.ico"
+    if os.path.exists(icon_path):
+        window.iconbitmap(icon_path)
+    ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID('danieleze.clipsync.1.0')
+
     window.title("ClipSync")
     window.geometry("360x220")
     window.resizable(False, False)
@@ -177,6 +186,19 @@ def _open_window_thread():
     window.mainloop()
 
 if __name__ == "__main__":
+    import socket
+    lock_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        lock_socket.bind(("localhost", 5766))
+    except OSError:
+        print("[ClipSync] Already running!")
+        import sys
+        sys.exit(0)
+    
+    import ctypes
+    myappid = 'danieleze.clipsync.1.0'
+    ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(myappid)
+    
     monitor_thread = threading.Thread(target=clipboard_monitor, daemon=True)
     monitor_thread.start()
 

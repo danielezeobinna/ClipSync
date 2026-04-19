@@ -23,6 +23,11 @@ import android.content.Context
 import androidx.core.content.edit
 import android.content.Intent
 import android.provider.Settings
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.expandVertically
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.shrinkVertically
 import androidx.core.net.toUri
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.RequestBody.Companion.toRequestBody
@@ -107,10 +112,22 @@ fun requestOverlayPermission(activity: MainActivity) {
 fun ClipSyncDialog() {
     val scope = rememberCoroutineScope()
     var statusText by remember {
-        mutableStateOf(if (ClipSyncService.isRunning) "Connected" else "Not connected")
+        mutableStateOf(
+            when {
+                !OverlayService.isRunning -> "Not connected"
+                ClipSyncService.isConnected -> "Connected"
+                else -> "Connection lost"
+            }
+        )
     }
     var statusColor by remember {
-        mutableStateOf(if (ClipSyncService.isRunning) Color(0xFF00CC66) else Color(0xFFAAAAAA))
+        mutableStateOf(
+            when {
+                !OverlayService.isRunning -> Color(0xFFAAAAAA)
+                ClipSyncService.isConnected -> Color(0xFF00CC66)
+                else -> Color(0xFFE74C3C)
+            }
+        )
     }
 
     Surface(
@@ -159,7 +176,33 @@ fun ClipSyncDialog() {
                 )
             )
 
-            Spacer(modifier = Modifier.height(16.dp))
+            Spacer(modifier = Modifier.height(12.dp))
+
+            AnimatedVisibility(
+                visible = isConnected,
+                enter = expandVertically() + fadeIn(),
+                exit = shrinkVertically() + fadeOut()
+            ) {
+                Column {
+                    Text(
+                        text = "💡 Tap the overlay icon to sync Android → Windows. Hold to open the app.",
+                        fontSize = 11.sp,
+                        color = Color(0xFF888888),
+                        modifier = Modifier.fillMaxWidth()
+                    )
+
+                    Spacer(modifier = Modifier.height(8.dp))
+
+                    Text(
+                        text = "💡 Tap a text field first before pasting to help the app detect where to paste.",
+                        fontSize = 11.sp,
+                        color = Color(0xFF888888),
+                        modifier = Modifier.fillMaxWidth()
+                    )
+
+                    Spacer(modifier = Modifier.height(12.dp))
+                }
+            }
 
             // Connect Button
 
@@ -167,11 +210,15 @@ fun ClipSyncDialog() {
                 onClick = {
                     if (isConnected) {
                         context.stopService(Intent(context, OverlayService::class.java))
+                        val stopIntent = Intent(context, OverlayService::class.java)
+                        context.stopService(stopIntent)
                         val stopService = Intent(context, ClipSyncService::class.java).apply {
                             action = "STOP"
                         }
                         context.startService(stopService)
                         isConnected = false
+                        statusText = "Not connected"
+                        statusColor = Color(0xFFAAAAAA)
                     } else {
                         scope.launch {
                             statusText = "Connecting..."
@@ -193,12 +240,27 @@ fun ClipSyncDialog() {
                                     statusColor = Color(0xFF00CC66)
                                     isConnected = true
                                     saveIp(context, ipText)
+
+                                    // Check notifications
+                                    val notifManager = context.getSystemService(android.app.NotificationManager::class.java)
+                                    if (!notifManager.areNotificationsEnabled()) {
+                                        android.widget.Toast.makeText(
+                                            context,
+                                            "Please enable notifications for ClipSync to work properly",
+                                            android.widget.Toast.LENGTH_LONG
+                                        ).show()
+                                        val intent = Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS).apply {
+                                            putExtra(Settings.EXTRA_APP_PACKAGE, context.packageName)
+                                        }
+                                        context.startActivity(intent)
+                                        return@launch
+                                    }
+
                                     if (checkOverlayPermission(context)) {
                                         val serviceIntent = Intent(context, ClipSyncService::class.java).apply {
                                             putExtra("windows_ip", ipText)
                                         }
                                         context.startForegroundService(serviceIntent)
-
                                         val overlayIntent = Intent(context, OverlayService::class.java).apply {
                                             putExtra("windows_ip", ipText)
                                         }
