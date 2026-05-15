@@ -212,7 +212,9 @@ class OverlayService : Service(), LifecycleOwner, SavedStateRegistryOwner {
                         if (tapDuration < 500) {
                             val intent = Intent(applicationContext, MainActivity::class.java).apply {
                                 action = "SILENT_SYNC"
-                                flags = Intent.FLAG_ACTIVITY_NEW_TASK
+                                flags = Intent.FLAG_ACTIVITY_NEW_TASK or
+                                        Intent.FLAG_ACTIVITY_NO_HISTORY or
+                                        Intent.FLAG_ACTIVITY_EXCLUDE_FROM_RECENTS
                             }
                             startActivity(intent)
                         } else {
