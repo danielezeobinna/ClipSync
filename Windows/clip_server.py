@@ -1,17 +1,20 @@
 import time
 import socket
 import threading
-import pyperclip # type: ignore
-from http.server import HTTPServer, BaseHTTPRequestHandler
-from pystray import Icon, Menu, MenuItem # type: ignore
-from PIL import Image, ImageDraw # type: ignore
+import pyperclip
+import asyncio
+import websockets
+from pystray import Icon, Menu, MenuItem
+from PIL import Image
 import tkinter as tk
 from tkinter import font as tkfont
 
 HOST = "0.0.0.0"
 PORT = 5765
 last_clip = ""
-server_instance = None
+ws_loop = None
+ws_stop = None
+clients = set()
 server_thread = None
 is_running = False
 tray_icon = None
@@ -33,32 +36,27 @@ def create_tray_icon():
         path = "logo.png"
     return Image.open(path)
 
-class ClipHandler(BaseHTTPRequestHandler):
-    def do_GET(self):
-        if self.path == "/clip":
-            content = last_clip.encode("utf-8")
-            self.send_response(200)
-            self.send_header("Content-Type", "text/plain; charset=utf-8")
-            self.send_header("Content-Length", str(len(content)))
-            self.end_headers()
-            self.wfile.write(content)
-        else:
-            self.send_response(404)
-            self.end_headers()
-
-    def do_POST(self):
-        if self.path == "/clip":
-            length = int(self.headers.get("Content-Length", 0))
-            body = self.rfile.read(length).decode("utf-8")
-            pyperclip.copy(body)
-            self.send_response(200)
-            self.end_headers()
-        else:
-            self.send_response(404)
-            self.end_headers()
-
-    def log_message(self, format, *args):
+async def ws_handler(ws):
+    global last_clip
+    clients.add(ws)
+    try:
+        if last_clip:
+            await ws.send(last_clip)
+        async for msg in ws:
+            if isinstance(msg, str) and msg and msg != last_clip:
+                last_clip = msg
+                pyperclip.copy(msg)
+    except websockets.ConnectionClosed:
         pass
+    finally:
+        clients.discard(ws)
+
+async def broadcast(text):
+    for ws in list(clients):
+        try:
+            await ws.send(text)
+        except Exception:
+            pass
 
 def clipboard_monitor():
     global last_clip
@@ -68,14 +66,24 @@ def clipboard_monitor():
                 current = pyperclip.paste()
                 if current != last_clip:
                     last_clip = current
+                    if current and ws_loop and clients:
+                        asyncio.run_coroutine_threadsafe(broadcast(current), ws_loop)
             except Exception:
                 pass
         time.sleep(0.5)
 
+async def _serve():
+    global ws_stop
+    ws_stop = asyncio.get_running_loop().create_future()
+    async with websockets.serve(ws_handler, HOST, PORT, ping_interval=30, ping_timeout=15):
+        await ws_stop
+
 def start_server():
-    global server_instance
-    server_instance = HTTPServer((HOST, PORT), ClipHandler)
-    server_instance.serve_forever()
+    global ws_loop
+    ws_loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(ws_loop)
+    ws_loop.run_until_complete(_serve())
+    ws_loop = None
 
 def do_start():
     global server_thread, is_running
@@ -86,12 +94,11 @@ def do_start():
         update_tray_menu()
 
 def do_stop():
-    global is_running, server_instance
+    global is_running
     if is_running:
         is_running = False
-        if server_instance:
-            threading.Thread(target=server_instance.shutdown, daemon=True).start()
-            server_instance = None
+        if ws_loop and ws_stop:
+            ws_loop.call_soon_threadsafe(lambda: ws_stop.done() or ws_stop.set_result(None))
         update_tray_menu()
 
 def update_tray_menu():

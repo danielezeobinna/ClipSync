@@ -2,53 +2,33 @@ package com.danieleze.clipsync
 
 import android.annotation.SuppressLint
 import android.app.Service
-import android.content.ClipData
-import android.content.ClipboardManager
-import android.content.Intent
+import android.content.*
 import android.graphics.PixelFormat
-import android.os.Handler
 import android.os.IBinder
-import android.os.Looper
-import android.view.Gravity
-import android.view.MotionEvent
-import android.view.WindowManager
-import androidx.compose.foundation.Image
-import androidx.compose.foundation.background
+import android.view.*
+import androidx.compose.foundation.*
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.runtime.*
-import androidx.compose.ui.Alignment
-import androidx.compose.ui.Modifier
+import androidx.compose.ui.*
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.ComposeView
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.*
-import androidx.savedstate.SavedStateRegistry
-import androidx.savedstate.SavedStateRegistryController
-import androidx.savedstate.SavedStateRegistryOwner
-import androidx.savedstate.setViewTreeSavedStateRegistryOwner
-import okhttp3.MediaType.Companion.toMediaType
-import okhttp3.OkHttpClient
-import okhttp3.Request
-import okhttp3.RequestBody.Companion.toRequestBody
-import java.util.concurrent.TimeUnit
+import androidx.savedstate.*
 import kotlin.math.abs
+import okhttp3.*
+import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.RequestBody.Companion.toRequestBody
 
 class OverlayService : Service(), LifecycleOwner, SavedStateRegistryOwner {
 
     private lateinit var windowManager: WindowManager
-    private lateinit var overlayView: android.view.View
+    private lateinit var overlayView: View
     private val lifecycleRegistry = LifecycleRegistry(this)
     private val savedStateRegistryController = SavedStateRegistryController.create(this)
-    private val handler = Handler(Looper.getMainLooper())
-    private var lastClipContent = ""
     private var windowsIp = ""
-
-    private val client = OkHttpClient.Builder()
-        .connectTimeout(3, TimeUnit.SECONDS)
-        .readTimeout(3, TimeUnit.SECONDS)
-        .build()
 
     override val lifecycle: Lifecycle get() = lifecycleRegistry
     override val savedStateRegistry: SavedStateRegistry get() = savedStateRegistryController.savedStateRegistry
@@ -56,7 +36,6 @@ class OverlayService : Service(), LifecycleOwner, SavedStateRegistryOwner {
     companion object {
         var isRunning = false
         var windowsIpStatic = ""
-        var lastClipStatic = ""
     }
 
     override fun onCreate() {
@@ -73,6 +52,7 @@ class OverlayService : Service(), LifecycleOwner, SavedStateRegistryOwner {
             val clip = clipboard.primaryClip?.getItemAt(0)?.text?.toString() ?: ""
             if (clip.isNotEmpty() && clip != ClipSyncService.lastClipContent) {
                 ClipSyncService.lastClipContent = clip
+                ClipSyncService.send(clip)
                 Thread {
                     try {
                         val body = clip.toRequestBody("text/plain".toMediaType())
@@ -81,7 +61,8 @@ class OverlayService : Service(), LifecycleOwner, SavedStateRegistryOwner {
                             .post(body)
                             .build()
                         OkHttpClient().newCall(request).execute()
-                    } catch (_: Exception) {}
+                    } catch (_: Exception) {
+                    }
                 }.start()
             }
         }
@@ -91,71 +72,10 @@ class OverlayService : Service(), LifecycleOwner, SavedStateRegistryOwner {
         windowsIp = intent?.getStringExtra("windows_ip") ?: windowsIpStatic
         windowsIpStatic = windowsIp
         showOverlay()
-        startSyncing()
         isRunning = true
         return START_STICKY
     }
 
-    private val syncRunnable = object : Runnable {
-        override fun run() {
-            syncClipboard()
-            handler.postDelayed(this, 2000)
-        }
-    }
-
-    private fun startSyncing() {
-        handler.post(syncRunnable)
-    }
-
-    private fun syncClipboard() {
-        // Read Android clipboard on main thread FIRST
-        val clipboard = getSystemService(CLIPBOARD_SERVICE) as ClipboardManager
-        val androidClip = clipboard.primaryClip?.getItemAt(0)?.text?.toString() ?: ""
-
-        Thread {
-            // Windows → Android
-            try {
-                val request = Request.Builder()
-                    .url("http://$windowsIp:5765/clip")
-                    .build()
-                val response = client.newCall(request).execute()
-                if (response.isSuccessful) {
-                    val content = response.body?.string() ?: ""
-                    if (content.isNotEmpty() && content != lastClipContent) {
-                        lastClipContent = content
-                        lastClipStatic = content
-                        handler.post {
-                            clipboard.setPrimaryClip(
-                                ClipData.newPlainText("ClipSync", content)
-                            )
-                        }
-                    }
-                }
-            } catch (_: Exception) {}
-
-            // Android → Windows
-            if (androidClip.isNotEmpty() && androidClip != lastClipContent) {
-                pushToWindows(androidClip)
-            }
-        }.start()
-    }
-
-    private fun pushToWindows(text: String) {
-        Thread {
-            try {
-                val body = text.toRequestBody("text/plain".toMediaType())
-                val request = Request.Builder()
-                    .url("http://$windowsIp:5765/clip")
-                    .post(body)
-                    .build()
-                client.newCall(request).execute()
-                lastClipContent = text
-                lastClipStatic = text
-            } catch (_: Exception) {}
-        }.start()
-    }
-
-    @Suppress("AssignedValueIsNeverRead")
     @SuppressLint("ClickableViewAccessibility")
     private fun showOverlay() {
         val params = WindowManager.LayoutParams(
@@ -196,6 +116,7 @@ class OverlayService : Service(), LifecycleOwner, SavedStateRegistryOwner {
                     isDragging = false
                     downTime = System.currentTimeMillis()
                 }
+
                 MotionEvent.ACTION_MOVE -> {
                     val dx = (initialTouchX - event.rawX).toInt()
                     val dy = (event.rawY - initialTouchY).toInt()
@@ -206,16 +127,18 @@ class OverlayService : Service(), LifecycleOwner, SavedStateRegistryOwner {
                         windowManager.updateViewLayout(composeView, params)
                     }
                 }
+
                 MotionEvent.ACTION_UP -> {
                     val tapDuration = System.currentTimeMillis() - downTime
                     if (!isDragging) {
                         if (tapDuration < 500) {
-                            val intent = Intent(applicationContext, MainActivity::class.java).apply {
-                                action = "SILENT_SYNC"
-                                flags = Intent.FLAG_ACTIVITY_NEW_TASK or
-                                        Intent.FLAG_ACTIVITY_NO_HISTORY or
-                                        Intent.FLAG_ACTIVITY_EXCLUDE_FROM_RECENTS
-                            }
+                            val intent =
+                                Intent(applicationContext, MainActivity::class.java).apply {
+                                    action = "SILENT_SYNC"
+                                    flags = Intent.FLAG_ACTIVITY_NEW_TASK or
+                                            Intent.FLAG_ACTIVITY_NO_HISTORY or
+                                            Intent.FLAG_ACTIVITY_EXCLUDE_FROM_RECENTS
+                                }
                             startActivity(intent)
                         } else {
                             // Long press → open app
@@ -240,7 +163,6 @@ class OverlayService : Service(), LifecycleOwner, SavedStateRegistryOwner {
     }
 
     override fun onDestroy() {
-        handler.removeCallbacks(syncRunnable)
         if (::overlayView.isInitialized) windowManager.removeView(overlayView)
         lifecycleRegistry.currentState = Lifecycle.State.DESTROYED
         isRunning = false

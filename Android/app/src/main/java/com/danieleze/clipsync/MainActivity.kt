@@ -1,36 +1,24 @@
 package com.danieleze.clipsync
 
 import android.os.Bundle
+import android.content.*
+import android.provider.Settings
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
+import androidx.compose.animation.*
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
-import androidx.compose.ui.Alignment
-import androidx.compose.ui.Modifier
+import androidx.compose.ui.*
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
-import androidx.compose.runtime.rememberCoroutineScope
-import kotlinx.coroutines.launch
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.withContext
-import okhttp3.OkHttpClient
-import okhttp3.Request
-import android.content.Context
+import androidx.compose.ui.unit.*
 import androidx.core.content.edit
-import android.content.Intent
-import android.provider.Settings
-import androidx.compose.animation.AnimatedVisibility
-import androidx.compose.animation.expandVertically
-import androidx.compose.animation.fadeIn
-import androidx.compose.animation.fadeOut
-import androidx.compose.animation.shrinkVertically
 import androidx.core.net.toUri
-import okhttp3.MediaType.Companion.toMediaType
-import okhttp3.RequestBody.Companion.toRequestBody
+import kotlin.time.Duration.Companion.seconds
+import kotlinx.coroutines.*
+import okhttp3.*
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -42,30 +30,17 @@ class MainActivity : ComponentActivity() {
             setContent {
                 SyncScreen {
                     // This runs after UI is shown
-                    val clipboard = getSystemService(CLIPBOARD_SERVICE) as android.content.ClipboardManager
+                    val clipboard = getSystemService(CLIPBOARD_SERVICE) as ClipboardManager
                     val clip = clipboard.primaryClip?.getItemAt(0)?.text?.toString() ?: ""
                     if (clip.isNotEmpty() && clip != ClipSyncService.lastClipContent) {
                         ClipSyncService.lastClipContent = clip
-                        Thread {
-                            try {
-                                val body = clip.toRequestBody("text/plain".toMediaType())
-                                val request = Request.Builder()
-                                    .url("http://${ClipSyncService.windowsIp}:5765/clip")
-                                    .post(body)
-                                    .build()
-                                OkHttpClient().newCall(request).execute()
-                                runOnUiThread {
-                                    android.widget.Toast.makeText(
-                                        this,
-                                        "Synced to Windows!",
-                                        android.widget.Toast.LENGTH_SHORT
-                                    ).show()
-                                    finish()
-                                }
-                            } catch (_: Exception) {
-                                runOnUiThread { finish() }
-                            }
-                        }.start()
+                        val sent = ClipSyncService.send(clip)
+                        android.widget.Toast.makeText(
+                            this,
+                            if (sent) "Synced to Windows!" else "Not connected",
+                            android.widget.Toast.LENGTH_SHORT
+                        ).show()
+                        finish()
                     } else {
                         android.widget.Toast.makeText(
                             this,
@@ -84,6 +59,29 @@ class MainActivity : ComponentActivity() {
             ClipSyncDialog()
         }
     }
+}
+
+suspend fun testConnection(ip: String): Boolean = withContext(Dispatchers.IO) {
+    val client = OkHttpClient.Builder()
+        .connectTimeout(5, java.util.concurrent.TimeUnit.SECONDS)
+        .build()
+    val result = CompletableDeferred<Boolean>()
+    val ws = client.newWebSocket(
+        Request.Builder().url("ws://$ip:5765").build(),
+        object : WebSocketListener() {
+            override fun onOpen(webSocket: WebSocket, response: Response) {
+                result.complete(true)
+            }
+
+            override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
+                result.complete(false)
+            }
+        }
+    )
+    val ok = withTimeoutOrNull(5.seconds) { result.await() } ?: false
+    ws.cancel()
+    client.dispatcher.executorService.shutdown()
+    ok
 }
 
 fun saveIp(context: Context, ip: String) {
@@ -224,17 +222,7 @@ fun ClipSyncDialog() {
                             statusText = "Connecting..."
                             statusColor = Color(0xFFFFAA00)
                             try {
-                                val result = withContext(Dispatchers.IO) {
-                                    val client = OkHttpClient.Builder()
-                                        .connectTimeout(5, java.util.concurrent.TimeUnit.SECONDS)
-                                        .readTimeout(5, java.util.concurrent.TimeUnit.SECONDS)
-                                        .build()
-                                    val request = Request.Builder()
-                                        .url("http://${ipText}:5765/clip")
-                                        .build()
-                                    val response = client.newCall(request).execute()
-                                    response.isSuccessful
-                                }
+                                val result = testConnection(ipText)
                                 if (result) {
                                     statusText = "Connected"
                                     statusColor = Color(0xFF00CC66)
@@ -242,28 +230,35 @@ fun ClipSyncDialog() {
                                     saveIp(context, ipText)
 
                                     // Check notifications
-                                    val notifManager = context.getSystemService(android.app.NotificationManager::class.java)
+                                    val notifManager =
+                                        context.getSystemService(android.app.NotificationManager::class.java)
                                     if (!notifManager.areNotificationsEnabled()) {
                                         android.widget.Toast.makeText(
                                             context,
                                             "Please enable notifications for ClipSync to work properly",
                                             android.widget.Toast.LENGTH_LONG
                                         ).show()
-                                        val intent = Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS).apply {
-                                            putExtra(Settings.EXTRA_APP_PACKAGE, context.packageName)
-                                        }
+                                        val intent =
+                                            Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS).apply {
+                                                putExtra(
+                                                    Settings.EXTRA_APP_PACKAGE,
+                                                    context.packageName
+                                                )
+                                            }
                                         context.startActivity(intent)
                                         return@launch
                                     }
 
                                     if (checkOverlayPermission(context)) {
-                                        val serviceIntent = Intent(context, ClipSyncService::class.java).apply {
-                                            putExtra("windows_ip", ipText)
-                                        }
+                                        val serviceIntent =
+                                            Intent(context, ClipSyncService::class.java).apply {
+                                                putExtra("windows_ip", ipText)
+                                            }
                                         context.startForegroundService(serviceIntent)
-                                        val overlayIntent = Intent(context, OverlayService::class.java).apply {
-                                            putExtra("windows_ip", ipText)
-                                        }
+                                        val overlayIntent =
+                                            Intent(context, OverlayService::class.java).apply {
+                                                putExtra("windows_ip", ipText)
+                                            }
                                         context.startService(overlayIntent)
                                     } else {
                                         requestOverlayPermission(context as MainActivity)
@@ -279,11 +274,19 @@ fun ClipSyncDialog() {
                         }
                     }
                 },
-                colors = ButtonDefaults.buttonColors(containerColor = if (isConnected) Color(0xFFE74C3C) else Color(0xFF1e90ff)),
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = if (isConnected) Color(
+                        0xFFE74C3C
+                    ) else Color(0xFF1e90ff)
+                ),
                 modifier = Modifier.fillMaxWidth(),
                 shape = RoundedCornerShape(8.dp)
             ) {
-                Text(if (isConnected) "Disconnect" else "Connect", color = Color.White, fontWeight = FontWeight.Bold)
+                Text(
+                    if (isConnected) "Disconnect" else "Connect",
+                    color = Color.White,
+                    fontWeight = FontWeight.Bold
+                )
             }
         }
     }

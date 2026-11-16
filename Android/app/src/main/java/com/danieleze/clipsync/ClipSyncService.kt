@@ -1,24 +1,16 @@
+@file:Suppress("UsePropertyAccessSyntax")
+
 package com.danieleze.clipsync
 
 import android.annotation.SuppressLint
-import android.app.Notification
-import android.app.NotificationChannel
-import android.app.NotificationManager
-import android.app.Service
-import android.content.ClipData
-import android.content.ClipboardManager
-import android.content.Intent
-import android.os.Handler
-import android.os.IBinder
-import android.os.Looper
-import okhttp3.MediaType.Companion.toMediaType
-import okhttp3.OkHttpClient
-import okhttp3.Request
-import okhttp3.RequestBody.Companion.toRequestBody
+import android.app.*
+import android.content.*
+import android.os.*
+import okhttp3.*
 import java.util.concurrent.TimeUnit
 
 class ClipSyncService : Service() {
-    private var wakeLock: android.os.PowerManager.WakeLock? = null
+    private var wakeLock: PowerManager.WakeLock? = null
 
     companion object {
         var isRunning = false
@@ -27,19 +19,51 @@ class ClipSyncService : Service() {
         var isConnected = false
         const val CHANNEL_ID = "clipsync_channel"
         const val NOTIF_ID = 1
+
+        @Volatile
+        private var socket: WebSocket? = null
+        fun send(text: String): Boolean = socket?.send(text) ?: false
     }
 
     private val handler = Handler(Looper.getMainLooper())
     private val client = OkHttpClient.Builder()
-        .connectTimeout(3, TimeUnit.SECONDS)
-        .readTimeout(3, TimeUnit.SECONDS)
+        .connectTimeout(5, TimeUnit.SECONDS)
+        .pingInterval(30, TimeUnit.SECONDS)
         .build()
+    private var retryDelay = 1000L
+    private var stopped = false
 
-    private val syncRunnable = object : Runnable {
-        override fun run() {
-            syncNow()
-            handler.postDelayed(this, 2000)
-        }
+    private fun connect() {
+        if (stopped) return
+        val request = Request.Builder().url("ws://$windowsIp:5765").build()
+        socket = client.newWebSocket(request, object : WebSocketListener() {
+            override fun onOpen(webSocket: WebSocket, response: Response) {
+                isConnected = true
+                retryDelay = 1000L
+            }
+
+            override fun onMessage(webSocket: WebSocket, text: String) {
+                if (text.isNotEmpty() && text != lastClipContent) {
+                    lastClipContent = text
+                    handler.post {
+                        val cm = getSystemService(CLIPBOARD_SERVICE) as ClipboardManager
+                        cm.setPrimaryClip(ClipData.newPlainText("ClipSync", text))
+                    }
+                }
+            }
+
+            override fun onClosed(webSocket: WebSocket, code: Int, reason: String) = onDrop()
+            override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) =
+                onDrop()
+        })
+    }
+
+    private fun onDrop() {
+        isConnected = false
+        socket = null
+        if (stopped) return
+        handler.postDelayed({ connect() }, retryDelay)
+        retryDelay = (retryDelay * 2).coerceAtMost(30000L)
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -50,12 +74,11 @@ class ClipSyncService : Service() {
         windowsIp = intent?.getStringExtra("windows_ip") ?: windowsIp
         isRunning = true
         startForeground(NOTIF_ID, buildNotification())
-        handler.post(syncRunnable)
 
         if (wakeLock == null) {
-            val pm = getSystemService(POWER_SERVICE) as android.os.PowerManager
+            val pm = getSystemService(POWER_SERVICE) as PowerManager
             wakeLock = pm.newWakeLock(
-                android.os.PowerManager.PARTIAL_WAKE_LOCK,
+                PowerManager.PARTIAL_WAKE_LOCK,
                 "ClipSync::WakeLock"
             ).also {
                 it.setReferenceCounted(false)
@@ -63,67 +86,29 @@ class ClipSyncService : Service() {
                 it.acquire() // no timeout
             }
         }
+        stopped = false
+        handler.removeCallbacksAndMessages(null)
+        socket?.cancel()
+        socket = null
+        retryDelay = 1000L
+        connect()
         return START_STICKY
-    }
-
-    private fun syncNow() {
-        // Read Android clipboard on main thread
-        val clipboard = getSystemService(CLIPBOARD_SERVICE) as ClipboardManager
-        val androidClip = clipboard.primaryClip?.getItemAt(0)?.text?.toString() ?: ""
-
-        Thread {
-            // Windows → Android
-            try {
-                val request = Request.Builder()
-                    .url("http://$windowsIp:5765/clip")
-                    .build()
-                val response = client.newCall(request).execute()
-                isConnected = response.isSuccessful
-                if (response.isSuccessful) {
-                    val content = response.body?.string() ?: ""
-                    if (content.isNotEmpty() && content != lastClipContent) {
-                        lastClipContent = content
-                        handler.post {
-                            clipboard.setPrimaryClip(
-                                ClipData.newPlainText("ClipSync", content)
-                            )
-                        }
-                    }
-                }
-            } catch (_: Exception) {}
-
-            // Android → Windows
-            if (androidClip.isNotEmpty() && androidClip != lastClipContent) {
-                try {
-                    val body = androidClip.toRequestBody("text/plain".toMediaType())
-                    val request = Request.Builder()
-                        .url("http://$windowsIp:5765/clip")
-                        .post(body)
-                        .build()
-                    client.newCall(request).execute()
-                    lastClipContent = androidClip
-                } catch (_: Exception) {}
-            }
-        }.start()
     }
 
     private fun buildNotification(): Notification {
         val manager = getSystemService(NotificationManager::class.java)
-
-        // 1. Channel Level (The most important part)
         val channel = NotificationChannel(
             CHANNEL_ID,
-            "System Updates", // Use a generic but honest name
-            NotificationManager.IMPORTANCE_MIN // No icon in status bar, no sound
+            "System Updates",
+            NotificationManager.IMPORTANCE_MIN
         ).apply {
-            setShowBadge(false) // Don't show the dot on the app icon
-            lockscreenVisibility = Notification.VISIBILITY_SECRET // Hide from lockscreen
+            setShowBadge(false)
+            lockscreenVisibility = Notification.VISIBILITY_SECRET
         }
         manager.createNotificationChannel(channel)
 
-        // 2. Notification Level
         return Notification.Builder(this, CHANNEL_ID)
-            .setSmallIcon(R.drawable.ic_notification) // Transparent .png icon
+            .setSmallIcon(R.drawable.ic_notification)
             .setContentTitle("ClipSync is running")
             .setContentText(null)
             .setOngoing(true)
@@ -133,7 +118,11 @@ class ClipSyncService : Service() {
     }
 
     override fun onDestroy() {
-        handler.removeCallbacks(syncRunnable)
+        stopped = true
+        handler.removeCallbacksAndMessages(null)
+        socket?.cancel()
+        socket = null
+        isConnected = false
         isRunning = false
         wakeLock?.let { if (it.isHeld) it.release() }
         super.onDestroy()
